@@ -1,0 +1,594 @@
+---
+title: "San Diego Cartogram"
+output:
+  html_document:
+    theme: readable
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set( echo=TRUE, 
+                       fig.width=10, fig.height=6, 
+                       warning=FALSE, message=FALSE )
+
+```
+
+```{r, echo=TRUE, eval=TRUE}
+
+library( geojsonio )   # read shapefiles
+library( sp )          # work with shapefiles
+library( sf )          # work with shapefiles - simple features format
+library( mclust )      # cluster analysis 
+library( tmap )        # theme maps
+library( ggplot2 )     # graphing 
+library( ggthemes )    # nice formats for ggplots
+library( dplyr )       # data wrangling 
+library( pander )      # formatting RMD tables
+library( tidycensus )
+library( cartogram )  # spatial maps w/ tract size bias reduction
+library( corrplot )   # correlation plots 
+library(stargazer)
+
+
+```
+
+```{r}
+
+# clear the workspace
+rm( list = ls() )
+
+```
+
+
+
+# Part 1
+
+## Step 1: Identifying San Diego data
+```{r, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+crosswalk <- read.csv( "https://raw.githubusercontent.com/DS4PS/cpp-529-master/master/data/cbsatocountycrosswalk.csv",  stringsAsFactors=F, colClasses="character" )
+
+grep( "^SAN DIEGO", crosswalk$msaname, value=TRUE ) 
+
+these.msp <- crosswalk$msaname == grep( "^SAN DIEGO", crosswalk$msaname, value=TRUE ) 
+these.fips <- crosswalk$fipscounty[ these.msp ]
+these.fips <- na.omit( these.fips )
+```
+
+
+
+
+## Step 2: Download a Shapefile with Population Data
+
+```{r}
+# load your census API key:
+census_api_key("d1ebc703b11d55a73a9085894cf21895f1cc8450")
+
+state.fips <- substr( these.fips, 1, 2 )
+county.fips <- substr( these.fips, 3, 5 )
+
+cbind( these.fips, state.fips, county.fips ) %>% pander()
+```
+
+```{r}
+library( dplyr )
+library( tidycensus )
+library( sp )
+
+
+sd.pop <-
+get_acs( geography = "tract", variables = "B01003_001",
+         state =state.fips, county =county.fips, geometry = TRUE ) %>% 
+         select( GEOID, estimate ) %>%
+         rename( POP=estimate )
+
+sd.pop$GEOID<-sub( ".","", sd.pop$GEOID )
+```
+## Step 3: Add Census Data
+
+```{r}
+URL <- "https://github.com/DS4PS/cpp-529-master/raw/master/data/ltdb_std_2010_sample.rds"
+census.dat <- readRDS(gzcon(url( URL )))
+
+sdd <- merge( sd.pop, census.dat, by.x="GEOID", by.y="tractid" )
+
+sdd <- sdd[ ! st_is_empty( sdd ) , ]
+
+```
+
+## Step 4: Transform the Shapefile into a Dorling Cartogram
+
+
+```{r}
+sdd.sp <- as_Spatial( sdd )
+
+class( sdd.sp )
+
+plot( sdd.sp )
+
+# project map and remove empty tracts
+sdd.sp <- spTransform( sdd.sp, CRS("+init=epsg:3395"))
+sdd.sp <- sdd.sp[ sdd.sp$POP != 0 & (! is.na( sdd.sp$POP )) , ]
+
+# convert census tract polygons to dorling cartogram
+# no idea why k=0.03 works, but it does - default is k=5
+sdd.sp$pop.w <- sdd.sp$POP / 4000 # max(msp.sp$POP)   # standardizes it to max of 1.5
+sd_dorling <- cartogram_dorling( x=sdd.sp, weight="pop.w", k=0.05 )
+plot( sd_dorling )
+
+
+
+
+tm_shape( sd_dorling ) + 
+ tm_polygons( size="POP", col="hinc12", n=7, style="quantile", palette="Spectral" )+ 
+   tm_layout( "Dorling Cartogram \nof Household Income \nfor San Diego", 
+              title.position=c( "right","top" ) )
+
+```
+
+
+## Step 5: Clustering
+
+```{r}
+
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+d1 <- sd_dorling@data
+d2 <- select( d1, keep.these )
+d3 <- apply( d2, 2, scale )
+
+```
+
+### Perform Cluster Analysis
+```{r}
+
+set.seed( 1234 )
+fit <- Mclust( d3 )
+sd_dorling$cluster <- as.factor( fit$classification )
+summary( fit )
+
+```
+
+### Identifying Neighborhood Clusters
+
+```{r}
+data.dictionary <- 
+structure(list(LABEL = c("pnhwht12", "pnhblk12", "phisp12", 
+"pntv12", "pfb12", "polang12", "phs12", "pcol12", "punemp12", 
+"pflabf12", "pprof12", "pmanuf12", "pvet12", "psemp12", "hinc12", 
+"incpc12", "ppov12", "pown12", "pvac12", "pmulti12", "mrent12", 
+"mhmval12", "p30old12", "p10yrs12", "p18und12", "p60up12", "p75up12", 
+"pmar12", "pwds12", "pfhh12"), 
+VARIABLE = c("Percent white, non-Hispanic", 
+"Percent black, non-Hispanic", "Percent Hispanic", "Percent Native American race", 
+"Percent foreign born", "Percent speaking other language at home, age 5 plus", 
+"Percent with high school degree or less", "Percent with 4-year college degree or more", 
+"Percent unemployed", "Percent female labor force participation", 
+"Percent professional employees", "Percent manufacturing employees", 
+"Percent veteran", "Percent self-employed", "Median HH income, total", 
+"Per capita income", "Percent in poverty, total", "Percent owner-occupied units", 
+"Percent vacant units", "Percent multi-family units", "Median rent", 
+"Median home value", "Percent structures more than 30 years old", 
+"Percent HH in neighborhood 10 years or less", "Percent 17 and under, total", 
+"Percent 60 and older, total", "Percent 75 and older, total", 
+"Percent currently married, not separated", "Percent widowed, divorced and separated", 
+"Percent female-headed families with children")), 
+class = "data.frame", row.names = c(NA, -30L))
+
+```
+
+
+```{r}
+df.pct <- sapply( d2, ntile, 100 )
+d4 <- as.data.frame( df.pct )
+d4$cluster <- as.factor( paste0("GROUP-",fit$classification) )
+
+num.groups <- length( unique( fit$classification ) )
+
+stats <- 
+d4 %>% 
+  group_by( cluster ) %>% 
+  summarise_each( funs(mean) )
+
+t <- data.frame( t(stats), stringsAsFactors=F )
+names(t) <- paste0( "GROUP.", 1:num.groups )
+t <- t[-1,]
+
+
+
+for( i in 1:num.groups )
+{
+  z <- t[,i]
+  plot( rep(1,30), 1:30, bty="n", xlim=c(-75,100), 
+        type="n", xaxt="n", yaxt="n",
+        xlab="Percentile", ylab="",
+        main=paste("GROUP",i) )
+  abline( v=seq(0,100,25), lty=3, lwd=1.5, col="gray90" )
+  segments( y0=1:30, x0=0, x1=100, col="gray70", lwd=2 )
+  text( -0.2, 1:30, data.dictionary$VARIABLE[-1], cex=0.85, pos=2 )
+  points( z, 1:30, pch=19, col="firebrick", cex=1.5 )
+  axis( side=1, at=c(0,50,100), col.axis="gray", col="gray" )
+}
+```
+PART 1 LABELS:
+GROUP 1 - Mixed socioeconomic neighborhood undergoing gentrified redevelopment
+GROUP 2 - Professional working class surburban neighborhood
+GROUP 3 - Mixed cultural enclave 
+GROUP 4 - Wealthy business owners 
+GROUP 5 - Predominently Hispanic neighborhood
+GROUP 6 - Educated neighborhood
+
+
+# Part 2
+
+## Variable Selection for Clustering
+
+```{r}
+library( corrplot )
+
+d3 <- as.data.frame(d3)
+
+df.dim1 <- dplyr::select( d3, pown12, pmulti12, p10yrs12, pwds12, pfhh12 )
+
+df.dim1$pmulti12  <-  - df.dim1$pmulti12
+df.dim1$p10yrs12  <-  - df.dim1$p10yrs12
+df.dim1$pwds12    <-  - df.dim1$pwds12
+df.dim1$pfhh12    <-  - df.dim1$pfhh12
+
+df.dim2 <- d3[ c("pnhwht12", "pnhblk12", "phisp12", "pfb12", "polang12") ]
+
+df.dim3 <- select( d3, pcol12, phs12, pprof12, hinc12, mhmval12 )
+```
+
+### Construct new indices
+
+
+```{r}
+dim1 <- d3$pown12 - d3$pmulti12 - d3$p10yrs12 - d3$pwds12 - d3$pfhh12
+dim2 <- - d3$pnhwht12 + d3$pnhblk12 + d3$phisp12 + d3$pfb12 + d3$polang12
+dim3 <- d3$pcol12 - d3$phs12 + d3$pprof12 + d3$hinc12 + d3$mhmval12
+
+df.nhood.metrics <- data.frame( dim1, dim2, dim3 )
+summary( df.nhood.metrics )
+```
+
+
+```{r}
+URL1 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2000.rds"
+d1 <- readRDS( gzcon( url( URL1 ) ) )
+
+URL2 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2010.rds"
+d2 <- readRDS( gzcon( url( URL2 ) ) )
+
+URLmd <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-META-DATA.rds"
+md <- readRDS( gzcon( url( URLmd ) ) )
+
+d1 <- select( d1, - year )
+d2 <- select( d2, - year )
+
+d <- merge( d1, d2, by="tractid" )
+d <- merge( d, md, by="tractid" )
+
+
+x <- d$tractid 
+
+x <- gsub( "fips", "", x )
+x <- gsub( "-", "", x )
+ 
+x <- as.numeric( x )
+
+
+d$tractid2 <- x 
+
+sdd <- merge( sdd, d, by.x="GEOID", by.y="tractid", all.x=T )
+```
+
+
+
+
+Lab 5 Data
+```{r}
+library( dplyr )
+library( knitr )
+library( pander )
+library( stargazer )
+library( scales )
+
+set.seed( 1234 )
+
+# set stargazer type to text for 
+# previewing in RMD docs but
+# convert to type HTML when knitting
+# (next code chunk)
+
+s.type <- "text"  
+
+```
+
+```{r}
+###################################
+#
+#     STARGAZER SETTINGS
+#
+###################################
+
+# DO NOT RUN CHUNK UNLESS KNITTING:
+# changes table formats to html
+# before rendering RMD docs
+
+s.type <- "html"
+```
+
+
+Helper functions for the pairs() correlation table:
+
+
+```{r}
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits=digits)[1]
+    txt <- paste(prefix, txt, sep="")
+    if(missing(cex.cor)) cex <- 0.8/strwidth(txt)
+    
+    test <- cor.test(x,y)
+    # borrowed from printCoefmat
+    Signif <- symnum(test$p.value, corr = FALSE, na = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                  symbols = c("***", "**", "*", ".", " "))
+    
+    text(0.5, 0.5, txt, cex = 1.5 )
+    text(.7, .8, Signif, cex=cex, col=2)
+}
+
+panel.smooth <- function (x, y, col = par("col"), bg = NA, pch = par("pch"), 
+    cex = 0.5, col.smooth = "red", span = 2/3, iter = 3, ...) 
+{
+    points(x, y, pch = 19, col = gray(0.7,0.2), bg = bg, cex = cex)
+    ok <- is.finite(x) & is.finite(y)
+    if (any(ok)) 
+        lines(stats::lowess(x[ok], y[ok], f = span, iter = iter), 
+            col = col.smooth, lwd=2, ...)
+}
+
+# custom plot
+jplot <- function( x1, x2, lab1="", lab2="", draw.line=T, ... )
+{
+
+    plot( x1, x2,
+          pch=19, 
+          col=gray(0.6, alpha = 0.2), 
+          cex=0.5,  
+          bty = "n",
+          xlab=lab1, 
+          ylab=lab2, cex.lab=1.5,
+        ... )
+
+    if( draw.line==T ){ 
+        ok <- is.finite(x1) & is.finite(x2)
+        lines( lowess(x2[ok]~x1[ok]), col="red", lwd=3 ) }
+
+}
+```
+
+
+```{r}
+URL1 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2000.rds"
+d1 <- readRDS( gzcon( url( URL1 ) ) )
+
+URL2 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2010.rds"
+d2 <- readRDS( gzcon( url( URL2 ) ) )
+
+URLmd <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-META-DATA.rds"
+md <- readRDS( gzcon( url( URLmd ) ) )
+
+d1 <- select( d1, - year )
+d2 <- select( d2, - year )
+
+d <- merge( d1, d2, by="tractid" )
+d <- merge( d, md, by="tractid" )
+
+x <- d$tractid 
+x <- gsub("fips", "", x)
+x <- gsub("-", "", x)
+x <- as.numeric(x)
+d$tractid2 <- x
+
+sdd <- merge(sdd, d, by.x = "GEOID", by.y = "tractid", all.x = TRUE)
+
+```
+
+Filter Rural Districts
+
+```{r}
+table( d$urban )
+```
+
+
+
+```{r}
+d <- filter( d, urban == "urban" )
+```
+
+Create a variable that measures the growth of median home value from 2000 to 2010.
+
+```{r}
+d <- select( d, tractid, 
+             mhmval00, mhmval12, 
+             hinc00, 
+             hu00, vac00, own00, rent00, h30old00,
+             empclf00, clf00, unemp00, prof00,  
+             dpov00, npov00,
+             ag25up00, hs00, col00, 
+             pop00.x, nhwht00, nhblk00, hisp00, asian00,
+             cbsa, cbsaname )
+
+ 
+d <- 
+  d %>%
+  mutate( # percent white in 2000
+          p.white = 100 * nhwht00 / pop00.x,
+          # percent black in 2000
+          p.black = 100 * nhblk00 / pop00.x,
+          # percent hispanic in 2000
+          p.hisp = 100 * hisp00 / pop00.x, 
+          # percent asian in 2000
+          p.asian = 100 * asian00 / pop00.x,
+          # percent high school grads by age 25 in 2000 
+          p.hs = 100 * (hs00+col00) / ag25up00,
+          # percent pop with college degree in 2000
+          p.col = 100 * col00 / ag25up00,
+          # percent employed in professional fields in 2000
+          p.prof = 100 * prof00 / empclf00,
+          # percent unemployment  in 2000
+          p.unemp = 100 * unemp00 / clf00,
+          # percent of housing lots in tract that are vacant in 2000
+          p.vacant = 100 * vac00 / hu00,
+          # dollar change in median home value 2000 to 2010 
+          pov.rate = 100 * npov00 / dpov00 )
+
+
+# adjust 2000 home values for inflation 
+mhv.00 <- d$mhmval00 * 1.28855  
+mhv.10 <- d$mhmval12
+
+# change in MHV in dollars
+mhv.change <- mhv.10 - mhv.00
+```
+
+Omit cases that have a median home value less than $1,000 in 2000
+```{r}
+# drop low 2000 median home values
+# to avoid unrealistic growth rates.
+#
+# tracts with homes that cost less than
+# $1,000 are outliers
+mhv.00[ mhv.00 < 1000 ] <- NA
+```
+
+Omit cases with growth rates above 200%.
+```{r}
+# change in MHV in percent
+mhv.growth <- 100 * ( mhv.change / mhv.00 )
+
+d$mhv.00 <- mhv.00
+d$mhv.10 <- mhv.10
+d$mhv.change <- mhv.change
+d$mhv.growth <- mhv.growth 
+```
+
+Median Home Value 
+```{r}
+hist( mhv.00, breaks=200, xlim=c(0,500000), 
+      col="gray20", border="white",
+      axes=F, 
+      xlab="MHV (median = $138k)",
+      ylab="",
+      main="Median Home Value in 2000 (2010 US dollars)" )
+
+axis( side=1, at=seq(0,500000,100000), 
+      labels=c("$0","$100k","$200k","$300k","$400k","$500k") )
+
+abline( v=median( mhv.00, na.rm=T ), col="orange", lwd=3 )
+```
+
+
+
+Visualize the distribution of changes across all urban tracts between 2000 and 2010 (these are replications of steps in the tutorial as well).
+
+```{r}
+hist( mhv.change/1000, breaks=500, 
+      xlim=c(-100,500), yaxt="n", xaxt="n",
+      xlab="Thousand of US Dollars (adjusted to 2010)", cex.lab=1.5,
+      ylab="", main="Change in Median Home Value 2000 to 2010",
+      col="gray20", border="white" )
+
+axis( side=1, at=seq( from=-100, to=500, by=100 ), 
+      labels=paste0( "$", seq( from=-100, to=500, by=100 ), "k" ) )
+        
+mean.x <- mean( mhv.change/1000, na.rm=T )
+abline( v=mean.x, col="darkorange", lwd=2, lty=2 )
+text( x=200, y=1500, 
+      labels=paste0( "Mean = ", dollar( round(1000*mean.x,0)) ), 
+      col="darkorange", cex=1.8, pos=3 )
+
+median.x <- median( mhv.change/1000, na.rm=T )
+abline( v=median.x, col="dodgerblue", lwd=2, lty=2 )
+text( x=200, y=2000, 
+      labels=paste0( "Median = ", dollar( round(1000*median.x,0)) ), 
+      col="dodgerblue", cex=1.8, pos=3 )
+```
+
+```{r}
+
+
+#create a dataframe containing GEOID, mhv.change, and mhv.growth
+mhv_data <- data.frame(GEOID = d$tractid, MHVChange = mhv.change, MHVGrowth = mhv.growth)
+
+#merge mhv_data into the sdd dataset based on GEOID
+sdd <- merge(sdd, mhv_data, by = "GEOID", all.x = TRUE)
+
+```
+
+Percent Change in MHV 2000 to 2010
+
+```{r}
+hg <-
+hist( mhv.growth, breaks=5000, 
+      xlim=c(-100,200), yaxt="n", xaxt="n",
+      xlab="", cex.main=1.5,
+      ylab="", main="Growth in Home Value by Census Tract 2000 to 2010",
+      col="gray40", border="white" )
+
+axis( side=1, at=seq( from=-100, to=200, by=50 ), 
+      labels=paste0( seq( from=-100, to=200, by=50 ), "%" ) )
+
+ymax <- max( hg$count )
+        
+mean.x <- mean( mhv.growth, na.rm=T )
+abline( v=mean.x, col="darkorange", lwd=2, lty=2 )
+text( x=100, y=(0.5*ymax), 
+      labels=paste0( "Mean = ", round(mean.x,0), "%"), 
+      col="darkorange", cex=1.8, pos=4 )
+
+median.x <- median( mhv.growth, na.rm=T )
+abline( v=median.x, col="dodgerblue", lwd=2, lty=2 )
+text( x=100, y=(0.6*ymax), 
+      labels=paste0( "Median = ", round(median.x,0), "%"), 
+      col="dodgerblue", cex=1.8, pos=4 )
+```
+
+Saving Cartogram
+
+```{r}
+library( geojsonio )
+
+# data frame and polygon ID standardization in case a tract was dropped and IDs don't match
+row.ids <- sapply( slot( sd_dorling, "polygons" ), function(x) slot( x, "ID" ) )
+row.names( sd_dorling ) <- row.ids
+
+# project to standard lat-lon coordinate system 
+sd_dorling <- spTransform( sd_dorling, CRS("+proj=longlat +datum=WGS84") )
+
+# write to file 
+geojson_write( sd_dorling, file="sd_dorling.geojson", geometry="polygon" )
+```
+
+```{r}
+library( geojsonio )
+library( sp )
+
+# load from github
+github.url <- "https://raw.githubusercontent.com/lkeo1/sdmap_dorling/master/sd_dorling.geojson"
+sdd.sp <- geojson_read( x=github.url,  what="sp" )
+ 
+plot( sdd )
+```
+
